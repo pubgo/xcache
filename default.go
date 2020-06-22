@@ -5,10 +5,10 @@ import (
 	"github.com/pubgo/xcache/consts"
 	"github.com/pubgo/xcache/singleflight"
 	"github.com/pubgo/xerror"
+	"go.uber.org/atomic"
 	"math"
 	"math/rand"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -17,15 +17,8 @@ const (
 	keyCode = 1<<key16 - 1
 )
 
-type keyType uint8
-
-const (
-	keyTree keyType = iota + 1
-	keyIndex
-)
-
-var emptyItem = item{}
 var _ IXCache = (*xcache)(nil)
+var emptyItem = item{}
 var defaultXCache = func() IXCache {
 	x := New()
 	xerror.Exit(x.Init())
@@ -35,9 +28,12 @@ var defaultXCache = func() IXCache {
 // New ...
 func New() *xcache {
 	x := new(xcache)
-	x.dup = make(map[string]item)
-	x.items = make(map[uint16]map[uint16]item, keyCode)
 	x.rb = newRingBuf()
+	x.sg = new(singleflight.Group)
+	x.headItem = &headItem{
+		dup:   make(map[string]item),
+		items: make(map[uint16]map[uint16]item, keyCode),
+	}
 	return x.init()
 }
 
@@ -51,17 +47,13 @@ type item struct {
 }
 
 type xcache struct {
-	mutex   sync.Mutex
-	janitor *janitor
-	sg      singleflight.Group
-	opts    Options
-	size    uint32
-	count   uint32
-	rb      *ringBuf
-	items   map[uint16]map[uint16]item
-	dup     map[string]item
-	expired queue
-	evicted func(k []byte, v []byte)
+	mutex    sync.Mutex
+	sg       *singleflight.Group
+	opts     Options
+	size     atomic.Uint32
+	count    atomic.Uint32
+	rb       *ringBuf
+	headItem *headItem
 }
 
 // GetWithDataLoad ...
@@ -157,25 +149,6 @@ func (x *xcache) Init(opts ...Option) error {
 	return nil
 }
 
-func (x *xcache) get(key string) (item, bool) {
-	x.mutex.Lock()
-	defer x.mutex.Unlock()
-	itm, b := x.dup[key]
-	return itm, b
-}
-
-func (x *xcache) set(key string, itm item) {
-	x.mutex.Lock()
-	defer x.mutex.Unlock()
-	x.dup[key] = itm
-}
-
-func (x *xcache) del(key string) {
-	x.mutex.Lock()
-	defer x.mutex.Unlock()
-	delete(x.dup, key)
-}
-
 // 过期时间处理
 func (x *xcache) expiredHandle(d time.Duration) time.Duration {
 	return d + time.Duration(rand.Intn(int(x.opts.MinExpiration)))
@@ -207,23 +180,26 @@ func (x *xcache) getSet(k []byte, e time.Duration, fn ...func([]byte) ([]byte, e
 
 	xerror.Panic(x.checkKey(len(k)))
 
-	hashKey1, hashKey2 := x.hashKey(k)
-	itm, _, existed := x.search(k, hashKey1, hashKey2)
+	h1, h2 := x.hashKey(k)
+	itm, _, existed := x.search(string(k), h1, h2)
 	if existed {
 		if time.Now().UnixNano() < itm.expireAt {
 			return x.rb.Get(itm.u, itm.u2)[itm.keyLen:], nil
 		}
+		// 过期立即删除
+		go func() {
+			_ = x.Delete(k)
+		}()
 	}
 
 	// key不存在
-	if len(fn) == 0 {
-		go x.expired.Push(k)
+	if len(fn) == 0 || fn[0] == nil {
 		return nil, ErrKeyNotFound
 	}
 
 	var ch = make(chan error, 1)
-	dt1, err := x.sg.Do(string(k), func() (interface{}, error) {
-		var dt1 interface{}
+	var dt1 interface{}
+	dt1, err = x.sg.Do(string(k), func() (interface{}, error) {
 		go func() {
 			defer xerror.RespChanErr(ch)
 			dt1, err = fn[0](k)
@@ -240,6 +216,7 @@ func (x *xcache) getSet(k []byte, e time.Duration, fn ...func([]byte) ([]byte, e
 		}
 		return dt1, nil
 	})
+
 	if err != nil {
 		return nil, err
 	}
@@ -259,33 +236,18 @@ func (x *xcache) GetSet(k []byte, v []byte, e time.Duration) (bt []byte, err err
 	})
 }
 
-func (x *xcache) search(key []byte, h1, h2 uint16) (item, keyType, bool) {
-	keyHead, b := x.get(string(key))
-	if b {
-		return keyHead, keyTree, true
-	}
-
-	if x.items[h1] == nil {
-		x.items[h1] = make(map[uint16]item)
-		return emptyItem, keyTree, false
-	}
-
-	keyHead = x.items[h1][h2]
-	if keyHead.expireAt == 0 || keyHead.deleted {
-		return emptyItem, keyIndex, false
-	}
-
-	return keyHead, keyIndex, true
+func (x *xcache) search(key string, h1, h2 uint16) (item, keyType, bool) {
+	return x.headItem.get(key, h1, h2)
 }
 
 // Size ...
 func (x *xcache) Size() uint32 {
-	return atomic.LoadUint32(&x.size)
+	return x.size.Load()
 }
 
 // Len ...
 func (x *xcache) Len() uint32 {
-	return atomic.LoadUint32(&x.count)
+	return x.count.Load()
 }
 
 // SetDefault ...
@@ -296,12 +258,7 @@ func (x *xcache) SetDefault(key []byte, v []byte) error {
 // Set ...
 func (x *xcache) Set(key []byte, v []byte, e time.Duration) (err error) {
 	defer xerror.RespErr(&err)
-	// 计算大小
-	// 检查key value的长度和规范
-	// 存储
-	// 查询和替换
 
-	// 检查
 	xerror.Panic(x.checkKey(len(key)))
 	xerror.Panic(x.checkValue(len(v)))
 	xerror.Panic(x.checkExpiration(e))
@@ -316,7 +273,9 @@ func (x *xcache) Set(key []byte, v []byte, e time.Duration) (err error) {
 		}
 
 		if bufSize > x.opts.MaxBufSize {
-			xerror.Panic(x.DeleteExpired())
+			// 清空 singleflight
+			go x.sg.Clear()
+			go x.rb.ClearExpired()
 		}
 	}
 
@@ -326,23 +285,20 @@ func (x *xcache) Set(key []byte, v []byte, e time.Duration) (err error) {
 	itm1.u = itm1.size >> 3
 	itm1.expireAt = time.Now().Add(e).UnixNano()
 
-	hashKey1, hashKey2 := x.hashKey(key)
-	itm, kt, existed := x.search(key, hashKey1, hashKey2)
+	h1, h2 := x.hashKey(key)
+	k := string(key)
+	itm, kt, existed := x.search(k, h1, h2)
 	if existed {
 		itm1.u2 = x.rb.Replace(itm.u, itm.u2, dt)
-		atomic.AddUint32(&x.size, -uint32(itm.size))
-		if kt == keyIndex {
-			x.items[hashKey1][hashKey2] = itm1
-		} else {
-			x.dup[string(key)] = itm1
-		}
+		x.size.Sub(uint32(itm.size))
+		x.headItem.set(k, h1, h2, kt, itm1)
 	} else {
 		itm1.u2 = x.rb.Add(dt)
-		x.items[hashKey1][hashKey2] = itm1
-		atomic.AddUint32(&x.count, 1)
+		x.headItem.set(k, h1, h2, keyIndex, itm1)
+		x.count.Add(1)
 	}
 
-	atomic.AddUint32(&x.size, uint32(itm1.size))
+	x.size.Add(uint32(itm1.size))
 	return
 }
 
@@ -358,12 +314,12 @@ func (x *xcache) Get(k []byte) ([]byte, error) {
 
 // GetExpiration ...
 func (x *xcache) GetExpiration(key []byte) (value []byte, tm int64, err error) {
-	if err := x.checkKey(len(key)); err != nil {
-		return nil, 0, err
-	}
+	xerror.RespErr(&err)
+
+	xerror.Panic(x.checkKey(len(key)))
 
 	hashKey1, hashKey2 := x.hashKey(key)
-	itm, _, existed := x.search(key, hashKey1, hashKey2)
+	itm, _, existed := x.search(string(key), hashKey1, hashKey2)
 	if !existed {
 		return nil, 0, ErrKeyNotFound
 	}
@@ -372,35 +328,33 @@ func (x *xcache) GetExpiration(key []byte) (value []byte, tm int64, err error) {
 }
 
 // Delete ...
-func (x *xcache) Delete(k []byte) error {
-	hashKey1, hashKey2 := x.hashKey(k)
-	itm, kt, existed := x.search(k, hashKey1, hashKey2)
+func (x *xcache) Delete(k []byte) (err error) {
+	xerror.RespErr(&err)
+
+	xerror.Panic(x.checkKey(len(k)))
+
+	h1, h2 := x.hashKey(k)
+	itm, kt, existed := x.search(string(k), h1, h2)
 	if !existed {
-		return ErrKeyNotFound
+		return xerror.WrapF(ErrKeyNotFound, "key: %s", k)
 	}
 
-	if kt == keyIndex {
-		x.items[hashKey1][hashKey2] = emptyItem
-	} else {
-		x.del(string(k))
-	}
+	//if x.opts.EvictedHandle != nil {
+	//	go func() {
+	//		defer xerror.RespExit()
+	//		x.opts.EvictedHandle(k, x.rb.Get(itm.u, itm.u2))
+	//	}()
+	//}
 
-	if x.evicted != nil {
-		x.evicted(k, x.rb.Get(itm.u, itm.u2))
-	}
-
+	x.headItem.del(string(k), h1, h2, kt)
 	x.rb.Delete(itm.u, itm.u2)
-	atomic.AddUint32(&x.size, -uint32(itm.size))
-
+	x.size.Sub(uint32(itm.size))
+	x.count.Sub(1)
 	return nil
 }
 
 // DeleteExpired ...
 func (x *xcache) DeleteExpired() error {
-	//x.expired.Range(func(key, _ interface{}) bool {
-	//	_ = x.Delete([]byte(key.(string)))
-	//	return true
-	//})
 	return nil
 }
 

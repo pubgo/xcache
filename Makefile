@@ -24,8 +24,9 @@ rm_test:
 
 .PHONY: test_profile
 test_profile:
-	@go test -bench=. -benchmem -memprofile memprofile.out -cpuprofile profile.out example_test.go
+	@go test -bench=. -benchmem -memprofile memprofile.out -cpuprofile profile.out ./
 	@go tool pprof -http=":8081" profile.out
+	@#go tool pprof -http=":8081" memprofile.out
 
 .PHONY: build
 build:

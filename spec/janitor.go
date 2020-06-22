@@ -1,12 +1,6 @@
 package xcache
 
-import (
-	"github.com/pubgo/xcache/consts"
-	"github.com/pubgo/xerror"
-	"runtime"
-	"time"
-)
-
+/*
 // 定时清理过期数据
 func (x *xcache) initJanitor(interval time.Duration) error {
 	if interval > 0 {
@@ -57,3 +51,4 @@ func (j *janitor) Run(c *xcache) {
 		}
 	}
 }
+*/

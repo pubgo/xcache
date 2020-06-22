@@ -1,5 +1,11 @@
 package xcache
 
+import (
+	"go.uber.org/atomic"
+)
+
+type clearExpiredCommand struct{}
+
 type addCommand struct {
 	data []byte
 	ret  chan uint16
@@ -16,7 +22,12 @@ type ringBuf struct {
 	data        [keyCode]struct {
 		data [][]byte
 		q    queue
+		len  atomic.Uint32
 	}
+}
+
+func (r *ringBuf) ClearExpired() {
+	r.commandChan <- clearExpiredCommand{}
 }
 
 func (r *ringBuf) Add(bytes []byte) uint16 {
@@ -57,8 +68,15 @@ func (r *ringBuf) run() {
 			return
 		case c := <-r.commandChan:
 			switch c := c.(type) {
+			case clearExpiredCommand:
+				for i := 0; i < len(r.data); i++ {
+					if r.data[i].len.Load() == 0 {
+						r.data[i].data = nil
+					}
+				}
 			case deleteCommand:
-				go r.data[c.u].q.Push(int(c.u2))
+				r.data[c.u].q.Push(int(c.u2))
+				r.data[c.u].len.Sub(1)
 			case addCommand:
 				l := len(c.data) >> 3
 				size := r.data[l].q.Pop().(int)
@@ -69,6 +87,7 @@ func (r *ringBuf) run() {
 					r.data[l].data = append(r.data[l].data, c.data)
 					c.ret <- uint16(len(r.data[l].data)) - 1
 				}
+				r.data[l].len.Add(1)
 			}
 		}
 	}

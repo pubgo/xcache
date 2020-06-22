@@ -3,7 +3,6 @@ package xcache
 import (
 	"bytes"
 	"fmt"
-	fuzz "github.com/google/gofuzz"
 	"github.com/pubgo/xerror"
 	"github.com/pubgo/xtest"
 	"github.com/smartystreets/gunit"
@@ -13,12 +12,6 @@ import (
 
 func TestNew(t *testing.T) {
 	gunit.Run(new(xcacheFixture), t, gunit.Options.AllSequential())
-}
-
-type args struct {
-	Key   []byte
-	Value []byte
-	Dur   time.Duration
 }
 
 type xcacheFixture struct {
@@ -83,16 +76,10 @@ func (t *xcacheFixture) Options() Options {
 
 func (t *xcacheFixture) Setup() {
 	t.unit = New()
-
-	xtest.MockRegister(func(e *args, c fuzz.Continue) {
-		e.Key = xtest.RangeBytes(1, 100)
-		e.Value = xtest.RangeBytes(1, 100)
-		e.Dur = xtest.RangeDur(-5*time.Second, t.unit.opts.MaxExpiration+time.Second*5)
-	})
+	xerror.Exit(t.unit.Init())
 }
 
 func (t *xcacheFixture) Teardown() {
-
 	t.unit = nil
 }
 
@@ -145,7 +132,7 @@ func (t *xcacheFixture) TestGet() {
 		_, r2 := t.unit.Get(k)
 		switch xerror.Unwrap(r2) {
 		case ErrLength:
-			t.Assert(xerror.Unwrap(t.unit.checkKey(len(k))) == ErrLength)
+			t.Assert(xerror.Is(t.unit.checkKey(len(k)), ErrLength))
 		case ErrKeyNotFound:
 			key := xtest.RangeBytes(10, 20)
 			val := xtest.RangeBytes(10, 20)
@@ -166,4 +153,22 @@ func (t *xcacheFixture) TestGet() {
 		xtest.RangeBytes(512*1024, 513*1024),
 	)
 	fn.Do()
+}
+
+var x = New()
+
+func BenchmarkName(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		key := xtest.RangeBytes(10, 100)
+		val := xtest.RangeBytes(10, 100)
+		b.StartTimer()
+		xerror.Exit(x.Set(key, val, time.Second*10))
+
+		v, err := x.Get(key)
+		xerror.Exit(err)
+		if !bytes.Equal(val, v) {
+			b.Fatalf("%s %s", val, v)
+		}
+	}
 }

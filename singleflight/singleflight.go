@@ -16,6 +16,12 @@ type Group struct {
 	m  map[string]*call // lazily initialized
 }
 
+func (g *Group) Clear() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.m = nil
+}
+
 // Do executes and returns the results of the given function, making
 // sure that only one execution is in-flight for a given key at a
 // time. If a duplicate comes in, the duplicate caller waits for the

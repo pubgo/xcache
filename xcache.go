@@ -16,12 +16,13 @@ type IXCache interface {
 	Get(k []byte) ([]byte, error)
 	GetSet(k, v []byte, e time.Duration) ([]byte, error)
 	GetWithDataLoad(k []byte, e time.Duration, fn ...func(k []byte) (v []byte, err error)) ([]byte, error)
-	GetExpiration(k []byte) (v []byte, expired int64, err error)
 	Delete(k []byte) error
-	DeleteExpired() error
 	Init(opts ...Option) error
 	Option() Options
 }
+
+//DeleteExpired() error
+//GetExpiration(k []byte) (v []byte, expired int64, err error)
 
 // Options 缓存配置变量
 type Options struct {
@@ -42,7 +43,7 @@ type Options struct {
 	Delimiter    string
 
 	// 缓存过期驱逐处理
-	EvictedHandle func(key, value []byte)
+	//EvictedHandle func(key, value []byte)
 	// 缓存过期清理策略
 	// ExpiredHandle func(key, value []byte)
 	// 缓存内存超限处理
@@ -63,9 +64,9 @@ func Init(opts ...Option) error {
 	return defaultXCache.Init(opts...)
 }
 
-func DeleteExpired() error {
-	return defaultXCache.DeleteExpired()
-}
+//func DeleteExpired() error {
+//	return defaultXCache.DeleteExpired()
+//}
 
 func Delete(k []byte) error {
 	return defaultXCache.Delete(k)
@@ -83,9 +84,9 @@ func GetSet(k []byte, v []byte, e time.Duration) ([]byte, error) {
 	return defaultXCache.GetSet(k, v, e)
 }
 
-func GetWithExpiration(key []byte) (value []byte, tm int64, err error) {
-	return defaultXCache.GetExpiration(key)
-}
+//func GetWithExpiration(key []byte) (value []byte, tm int64, err error) {
+//	return defaultXCache.GetExpiration(key)
+//}
 
 func SetDefaultCache(i IXCache) {
 	defaultXCache = i
