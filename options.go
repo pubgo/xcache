@@ -32,22 +32,6 @@ func WithMinBufSize(minBufSize int) Option {
 	}
 }
 
-// WithMaxBufSize ...
-func WithMaxBufSize(maxBufSize uint32) Option {
-	return func(o *Options) {
-		o.MaxBufSize = maxBufSize
-		o.MaxBufExpand = o.MaxBufFactor * float32(o.MaxBufSize)
-	}
-}
-
-// WithMaxBufFactor ...
-func WithMaxBufFactor(maxBufFactor float32) Option {
-	return func(o *Options) {
-		o.MaxBufFactor = maxBufFactor
-		o.MaxBufExpand = o.MaxBufFactor * float32(o.MaxBufSize)
-	}
-}
-
 // WithMinDataSize ...
 func WithMinDataSize(minDataSize int) Option {
 	return func(o *Options) {
@@ -73,5 +57,29 @@ func WithDataLoadTime(mataLoadTime time.Duration) Option {
 func WithClearTime(clearTime time.Duration) Option {
 	return func(o *Options) {
 		o.ClearTime = clearTime
+	}
+}
+
+func WithClearNum(clearRate float32) Option {
+	return func(o *Options) {
+		o.ClearRate = clearRate
+	}
+}
+
+func WithSnowSlideStrategy(snowSlideStrategy func(expired time.Duration) time.Duration) Option {
+	return func(o *Options) {
+		o.SnowSlideStrategy = snowSlideStrategy
+	}
+}
+
+func WithPenetrateStrategy(penetrateStrategy func(k []byte, fn ...func(k []byte) ([]byte, error)) ([]byte, error)) Option {
+	return func(o *Options) {
+		o.PenetrateStrategy = penetrateStrategy
+	}
+}
+
+func WithBreakdownStrategy(breakdownStrategy func([]byte, []byte, time.Duration) ([]byte, time.Duration)) Option {
+	return func(o *Options) {
+		o.BreakdownStrategy = breakdownStrategy
 	}
 }

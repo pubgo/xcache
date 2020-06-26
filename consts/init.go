@@ -13,16 +13,15 @@ const (
 	// 默认最小缓存10M
 	DefaultMinBufSize = 10 * 1 << 20
 	// 默认最大缓存, 超过会清理过期数据
-	DefaultMaxBufSize = 500 * 1 << 20
+	DefaultMaxBufSize = 1500 * 1 << 20
 	// 默认扩展缓存系数
-	DefaultMaxBufFactor = 0.2
-	// 默认最大扩展缓存, 超过扩展缓存会返回错误信息
-	DefaultMaxBufExpand = DefaultMaxBufSize * (1 + DefaultMaxBufFactor)
 
 	// 缓存数据最小长度, key
 	DefaultMinDataSize = 5
-	// 缓存数据最大长度, key,value
+	// 缓存数据最大长度
 	DefaultMaxDataSize = 0xffff
+	// Key最大长度
+	DefaultMaxKeySize = 0xff
 
 	// 默认分隔符
 	DefaultDelimiter = "##"
@@ -31,5 +30,8 @@ const (
 	DefaultDataLoadTime = time.Second * 5
 
 	// 默认过期定时清理时间1m
-	DefaultClearTime = time.Minute
+	DefaultClearTime = time.Minute * 5
+
+	// 默认定期清理缓存数量为总数的10%
+	DefaultClearNum = 0.1
 )

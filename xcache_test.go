@@ -23,25 +23,6 @@ func (t *xcacheFixture) GetSet(k []byte, v []byte, e time.Duration) ([]byte, err
 	panic("implement me")
 }
 
-func (t *xcacheFixture) GetWithExpiration(key []byte) (value []byte, tm int64, err error) {
-	defer xerror.RespExit()
-
-	value, tm, err = t.unit.GetExpiration(key)
-
-	switch xerror.Unwrap(err) {
-	case ErrLength:
-		t.AssertEqual(t.unit.checkKey(len(key)), ErrLength)
-	case ErrKeyNotFound:
-		t.AssertEqual(tm, 0)
-		t.AssertEqual(len(value), 0)
-	case nil:
-	default:
-		xerror.Exit(err)
-	}
-
-	return
-}
-
 func (t *xcacheFixture) Delete(k []byte) error {
 	defer xerror.RespExit()
 
@@ -51,7 +32,7 @@ func (t *xcacheFixture) Delete(k []byte) error {
 	case ErrLength:
 		t.Assert(xerror.Is(t.unit.checkKey(len(k)), ErrLength))
 	case ErrKeyNotFound:
-		_, _, err = t.GetWithExpiration(k)
+		_, err = t.unit.Get(k)
 		t.AssertEqual(err, ErrKeyNotFound)
 	case nil:
 	default:
@@ -75,8 +56,7 @@ func (t *xcacheFixture) Options() Options {
 }
 
 func (t *xcacheFixture) Setup() {
-	t.unit = New()
-	xerror.Exit(t.unit.Init())
+	t.unit = xerror.PanicErr(New()).(*xcache)
 }
 
 func (t *xcacheFixture) Teardown() {
@@ -91,11 +71,11 @@ func (t *xcacheFixture) TestSet() {
 
 		switch xerror.Unwrap(err) {
 		case ErrLength:
-			t.Assert(xerror.Is(t.unit.checkKey(len(key)), ErrLength) || xerror.Is(t.unit.checkValue(len(value)), ErrLength))
+			t.Assert(xerror.Is(t.unit.checkKey(len(key)), ErrLength) || xerror.Is(t.unit.checkData(len(value)+len(key)), ErrLength))
 		case ErrExpiration:
 			t.Assert(xerror.Is(t.unit.checkExpiration(e), ErrExpiration))
 		case ErrBufExceeded:
-			t.Assert(t.unit.Size()+uint32(getDataSize(key, value)) >= t.unit.Option().MaxBufSize)
+			t.Assert(t.unit.Size()+uint32(len(append(key, value...))) >= t.unit.Option().MaxBufSize)
 		case nil:
 			val, err := t.unit.Get(key)
 			t.AssertEqual(err, nil)
@@ -155,20 +135,8 @@ func (t *xcacheFixture) TestGet() {
 	fn.Do()
 }
 
-var x = New()
-
 func BenchmarkName(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-		key := xtest.RangeBytes(10, 100)
-		val := xtest.RangeBytes(10, 100)
-		b.StartTimer()
-		xerror.Exit(x.Set(key, val, time.Second*10))
-
-		v, err := x.Get(key)
-		xerror.Exit(err)
-		if !bytes.Equal(val, v) {
-			b.Fatalf("%s %s", val, v)
-		}
+		
 	}
 }

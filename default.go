@@ -3,57 +3,53 @@ package xcache
 import (
 	"github.com/cespare/xxhash"
 	"github.com/pubgo/xcache/consts"
+	"github.com/pubgo/xcache/ringbuf"
 	"github.com/pubgo/xcache/singleflight"
 	"github.com/pubgo/xerror"
 	"go.uber.org/atomic"
-	"math"
 	"math/rand"
 	"sync"
 	"time"
 )
 
-const (
-	key16   = 16
-	keyCode = 1<<key16 - 1
-)
-
 var _ IXCache = (*xcache)(nil)
 var emptyItem = item{}
-var defaultXCache = func() IXCache {
-	x := New()
-	xerror.Exit(x.Init())
+var defaultXCache = func() *xcache {
+	x, err := New()
+	xerror.Exit(err)
 	return x
 }()
 
 // New ...
-func New() *xcache {
+func New(opts ...Option) (*xcache, error) {
 	x := new(xcache)
-	x.rb = newRingBuf()
 	x.sg = new(singleflight.Group)
+	x.rb = ringbuf.NewRingBuf()
 	x.headItem = &headItem{
 		dup:   make(map[string]item),
-		items: make(map[uint16]map[uint16]item, keyCode),
+		items: make(map[uint32]item),
 	}
-	return x.init()
+	x = x.init()
+	return x, x.Init(opts...)
 }
 
 type item struct {
-	keyLen   uint8
-	deleted  bool
+	_        uint8
+	key      uint8
 	size     uint16
-	u        uint16
-	u2       uint16
+	index    uint32
 	expireAt int64
 }
 
 type xcache struct {
 	mutex    sync.Mutex
-	sg       *singleflight.Group
 	opts     Options
 	size     atomic.Uint32
 	count    atomic.Uint32
-	rb       *ringBuf
+	sg       *singleflight.Group
+	rb       *ringbuf.RingBuf
 	headItem *headItem
+	janitor  *janitor
 }
 
 // GetWithDataLoad ...
@@ -72,13 +68,50 @@ func (x *xcache) init() *xcache {
 	x.opts.MaxExpiration = consts.DefaultMaxExpiration
 	x.opts.MinBufSize = consts.DefaultMinBufSize
 	x.opts.MaxBufSize = consts.DefaultMaxBufSize
-	x.opts.MaxBufFactor = consts.DefaultMaxBufFactor
-	x.opts.MaxBufExpand = consts.DefaultMaxBufExpand
 	x.opts.MinDataSize = consts.DefaultMinDataSize
 	x.opts.MaxDataSize = consts.DefaultMaxDataSize
+	x.opts.MaxKeySize = consts.DefaultMaxKeySize
 	x.opts.DataLoadTime = consts.DefaultDataLoadTime
 	x.opts.ClearTime = consts.DefaultClearTime
+	x.opts.ClearRate = consts.DefaultClearNum
 	x.opts.Delimiter = consts.DefaultDelimiter
+	x.opts.SnowSlideStrategy = func(expired time.Duration) time.Duration {
+		return expired + time.Duration(rand.Intn(int(x.opts.MinExpiration)))
+	}
+	x.opts.BreakdownStrategy = func(_ []byte, bytes []byte, dur time.Duration) ([]byte, time.Duration) {
+		if bytes == nil || len(bytes) == 0 {
+			return bytes, x.opts.SnowSlideStrategy(x.opts.MinExpiration)
+		}
+		return bytes, dur
+	}
+	x.opts.PenetrateStrategy = func(k []byte, fn ...func(k []byte) ([]byte, error)) ([]byte, error) {
+		var ch = make(chan error, 1)
+		var dt1 interface{}
+		var err error
+		dt1, err = x.sg.Do(string(k), func() (interface{}, error) {
+			go func() {
+				defer xerror.RespChanErr(ch)
+				dt1, err = fn[0](k)
+				ch <- xerror.WrapF(err, "key: %s", k)
+			}()
+
+			select {
+			case <-time.After(x.opts.DataLoadTime):
+				return nil, xerror.WrapF(ErrDataLoadTimeout, "key: %s", k)
+			case err = <-ch:
+				if err != nil {
+					return nil, err
+				}
+			}
+			return dt1, nil
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		return dt1.([]byte), nil
+	}
+
 	return x
 }
 
@@ -87,81 +120,86 @@ func (x *xcache) Init(opts ...Option) error {
 	x.mutex.Lock()
 	defer x.mutex.Unlock()
 
+	opt := x.opts
 	for _, o := range opts {
-		o(&x.opts)
+		o(&opt)
 	}
 
 	// 最大缓存判断
-	if x.opts.MaxBufSize > consts.DefaultMaxBufSize || x.opts.MaxBufSize < consts.DefaultMinBufSize {
-		return xerror.WrapF(ErrBufSize, "MaxBufSize: %d", x.opts.MaxBufSize)
-	}
-
-	// 最大扩展缓存2G
-	if x.opts.MaxBufExpand > math.MaxInt32 || x.opts.MaxBufExpand < consts.DefaultMinBufSize {
-		return xerror.WrapF(ErrBufExceeded, "MaxBufExpand: %d", x.opts.MaxBufExpand)
+	if opt.MaxBufSize > consts.DefaultMaxBufSize || opt.MaxBufSize < consts.DefaultMinBufSize {
+		return xerror.WrapF(ErrBufSize, "MaxBufSize: %d", opt.MaxBufSize)
 	}
 
 	// 过期时间判断
 	{
-		if x.opts.MaxExpiration > consts.DefaultMaxExpiration || x.opts.MaxExpiration < consts.DefaultMinExpiration {
+		if opt.MaxExpiration > consts.DefaultMaxExpiration || opt.MaxExpiration < consts.DefaultMinExpiration {
 			return xerror.WrapF(ErrExpiration, "MaxExpiration: %s", x.opts.MaxExpiration)
 		}
 
-		if x.opts.MinExpiration > consts.DefaultMaxExpiration || x.opts.MinExpiration < consts.DefaultMinExpiration {
-			return xerror.WrapF(ErrExpiration, "MinExpiration: %s", x.opts.MinExpiration)
+		if opt.MinExpiration > consts.DefaultMaxExpiration || opt.MinExpiration < consts.DefaultMinExpiration {
+			return xerror.WrapF(ErrExpiration, "MinExpiration: %s", opt.MinExpiration)
 		}
 
-		if x.opts.MinExpiration > x.opts.MaxExpiration {
-			return xerror.WrapF(ErrExpiration, "MinExpiration: %s, MaxExpiration: %s", x.opts.MinExpiration, x.opts.MaxExpiration)
+		if opt.MinExpiration > x.opts.MaxExpiration {
+			return xerror.WrapF(ErrExpiration, "MinExpiration: %s, MaxExpiration: %s", opt.MinExpiration, opt.MaxExpiration)
 		}
 	}
 
 	// 默认过期时间判断
-	if x.opts.DefaultExpiration > x.opts.MaxExpiration || x.opts.DefaultExpiration < consts.DefaultMinExpiration {
-		return xerror.WrapF(ErrExpiration, "DefaultExpiration: %s", x.opts.DefaultExpiration)
+	if opt.DefaultExpiration > opt.MaxExpiration || opt.DefaultExpiration < consts.DefaultMinExpiration {
+		return xerror.WrapF(ErrExpiration, "DefaultExpiration: %s", opt.DefaultExpiration)
 	}
 
 	// 数据长度判断
 	{
-		if x.opts.MaxDataSize > consts.DefaultMaxDataSize || x.opts.MaxDataSize < consts.DefaultMinDataSize {
-			return xerror.WrapF(ErrLength, "MaxDataSize: %s", x.opts.MaxDataSize)
+		if opt.MaxDataSize > consts.DefaultMaxDataSize || opt.MaxDataSize < consts.DefaultMinDataSize {
+			return xerror.WrapF(ErrLength, "MaxDataSize: %s", opt.MaxDataSize)
 		}
 
-		if x.opts.MinDataSize > consts.DefaultMaxDataSize || x.opts.MinDataSize < consts.DefaultMinDataSize {
+		if opt.MinDataSize > consts.DefaultMaxDataSize || opt.MinDataSize < consts.DefaultMinDataSize {
 			return xerror.WrapF(ErrLength, "MaxDataSize: %s", x.opts.MinDataSize)
 		}
 
-		if x.opts.MinDataSize > x.opts.MaxDataSize {
-			return xerror.WrapF(ErrLength, "MinDataSize: %s, MaxDataSize: %s", x.opts.MinDataSize, x.opts.MaxDataSize)
+		if opt.MinDataSize > opt.MaxDataSize {
+			return xerror.WrapF(ErrLength, "MinDataSize: %s, MaxDataSize: %s", opt.MinDataSize, opt.MaxDataSize)
+		}
+
+		if opt.MaxKeySize < consts.DefaultMinDataSize || opt.MaxKeySize > consts.DefaultMaxKeySize || opt.MaxKeySize > opt.MaxDataSize {
+			return xerror.WrapF(ErrLength, "MaxKeySize: %s, MaxDataSizeL %s", opt.MaxKeySize, opt.MaxDataSize)
 		}
 	}
 
 	// 过期清理时间校验
-	if x.opts.ClearTime > consts.DefaultMaxExpiration || x.opts.ClearTime < consts.DefaultMinExpiration {
-		return xerror.WrapF(ErrClearTime, "ClearTime: %s", x.opts.ClearTime)
+	if opt.ClearTime < consts.DefaultMinExpiration {
+		return xerror.WrapF(ErrClearTime, "ClearTime: %s", opt.ClearTime)
 	}
 
 	// 数据加载时间校验
-	if x.opts.DataLoadTime > consts.DefaultMaxExpiration || x.opts.DataLoadTime < consts.DefaultMinExpiration {
-		return xerror.WrapF(ErrDataLoadTime, "DataLoadTime: %s", x.opts.ClearTime)
+	if opt.DataLoadTime > consts.DefaultMaxExpiration || opt.DataLoadTime < consts.DefaultMinExpiration {
+		return xerror.WrapF(ErrDataLoadTime, "DataLoadTime: %s", opt.ClearTime)
 	}
 
+	// 定期清理数据校验
+	if opt.ClearRate < 0 {
+		return xerror.WrapF(ErrClearNum, "clear_rate: %f", opt.ClearRate)
+	}
+
+	if err := x.initJanitor(); err != nil {
+		return err
+	}
+
+	x.opts = opt
 	return nil
 }
 
-// 过期时间处理
-func (x *xcache) expiredHandle(d time.Duration) time.Duration {
-	return d + time.Duration(rand.Intn(int(x.opts.MinExpiration)))
-}
-
 func (x *xcache) checkKey(keySize int) error {
-	if keySize > x.opts.MaxDataSize || keySize < x.opts.MinDataSize {
+	if keySize > x.opts.MaxKeySize || keySize < x.opts.MinDataSize {
 		return xerror.WrapF(ErrLength, "keySize: %d", keySize)
 	}
 	return nil
 }
 
-func (x *xcache) checkValue(valSize int) error {
+func (x *xcache) checkData(valSize int) error {
 	if valSize > x.opts.MaxDataSize {
 		return xerror.WrapF(ErrLength, "valSize: %d", valSize)
 	}
@@ -180,53 +218,35 @@ func (x *xcache) getSet(k []byte, e time.Duration, fn ...func([]byte) ([]byte, e
 
 	xerror.Panic(x.checkKey(len(k)))
 
-	h1, h2 := x.hashKey(k)
-	itm, _, existed := x.search(string(k), h1, h2)
+	h1 := x.hashKey(k)
+	itm, _, existed := x.search(string(k), h1)
 	if existed {
 		if time.Now().UnixNano() < itm.expireAt {
-			return x.rb.Get(itm.u, itm.u2)[itm.keyLen:], nil
+			return x.rb.Get(itm.index)[itm.key:], nil
 		}
-		// 过期立即删除
+		// 惰性过期清理
 		go func() {
 			_ = x.Delete(k)
 		}()
 	}
 
-	// key不存在
+	// key不存在并且数据加载函数为nil
 	if len(fn) == 0 || fn[0] == nil {
 		return nil, ErrKeyNotFound
 	}
 
-	var ch = make(chan error, 1)
-	var dt1 interface{}
-	dt1, err = x.sg.Do(string(k), func() (interface{}, error) {
-		go func() {
-			defer xerror.RespChanErr(ch)
-			dt1, err = fn[0](k)
-			ch <- xerror.WrapF(err, "key: %s", k)
-		}()
-
-		select {
-		case <-time.After(x.opts.DataLoadTime):
-			return nil, xerror.WrapF(ErrDataLoadTimeout, "key: %s", k)
-		case err = <-ch:
-			if err != nil {
-				return nil, err
-			}
-		}
-		return dt1, nil
-	})
+	if x.opts.PenetrateStrategy != nil {
+		dt, err = x.opts.PenetrateStrategy(k, fn...)
+	} else {
+		dt, err = fn[0](k)
+	}
 
 	if err != nil {
 		return nil, err
 	}
 
-	dt = dt1.([]byte)
-	var expired = x.opts.MinExpiration
-	if dt != nil {
-		expired = e
-	}
-	return dt, x.Set(k, dt, expired)
+	dt, e = x.opts.BreakdownStrategy(k, dt, e)
+	return dt, x.Set(k, dt, e)
 }
 
 // GetSet ...
@@ -236,8 +256,8 @@ func (x *xcache) GetSet(k []byte, v []byte, e time.Duration) (bt []byte, err err
 	})
 }
 
-func (x *xcache) search(key string, h1, h2 uint16) (item, keyType, bool) {
-	return x.headItem.get(key, h1, h2)
+func (x *xcache) search(key string, h1 uint32) (item, keyType, bool) {
+	return x.headItem.get(key, h1)
 }
 
 // Size ...
@@ -259,108 +279,100 @@ func (x *xcache) SetDefault(key []byte, v []byte) error {
 func (x *xcache) Set(key []byte, v []byte, e time.Duration) (err error) {
 	defer xerror.RespErr(&err)
 
-	xerror.Panic(x.checkKey(len(key)))
-	xerror.Panic(x.checkValue(len(v)))
+	keyLen := len(key)
+	xerror.Panic(x.checkKey(keyLen))
+
+	l := keyLen + len(v)
+	xerror.Panic(x.checkData(l))
+
 	xerror.Panic(x.checkExpiration(e))
+	// 给时间设置随机性，防止雪崩
+	if x.opts.SnowSlideStrategy != nil {
+		e = x.opts.SnowSlideStrategy(e)
+	}
 
-	var dt = make([]byte, len(key)+len(v))
-	copy(dt[copy(dt, key):], v)
+	var dt = append(key, v...)
 
+	// 内存超限处理
 	{
-		bufSize := x.Size() + uint32(len(dt))
-		if float32(bufSize) > x.opts.MaxBufExpand {
-			return xerror.WrapF(ErrBufExceeded, "bufSize: %d", bufSize)
-		}
-
+		// 超过最大缓存, 直接报错
+		bufSize := x.size.Add(uint32(l))
 		if bufSize > x.opts.MaxBufSize {
-			// 清空 singleflight
-			go x.sg.Clear()
-			go x.rb.ClearExpired()
+			x.size.Sub(uint32(l))
+			go func() {
+				_ = x.DeleteExpired()
+			}()
+			return ErrBufExceeded
 		}
 	}
 
 	var itm1 item
-	itm1.size = uint16(len(dt))
-	itm1.keyLen = uint8(len(key))
-	itm1.u = itm1.size >> 3
+	itm1.key = uint8(keyLen)
+	itm1.size = uint16(l)
 	itm1.expireAt = time.Now().Add(e).UnixNano()
 
-	h1, h2 := x.hashKey(key)
+	h1 := x.hashKey(key)
 	k := string(key)
-	itm, kt, existed := x.search(k, h1, h2)
+	itm, kt, existed := x.search(k, h1)
 	if existed {
-		itm1.u2 = x.rb.Replace(itm.u, itm.u2, dt)
-		x.size.Sub(uint32(itm.size))
-		x.headItem.set(k, h1, h2, kt, itm1)
+		itm1.index = x.rb.Replace(itm.index, dt)
+		x.headItem.set(k, h1, kt, itm1)
+		x.size.Sub(uint32(l))
 	} else {
-		itm1.u2 = x.rb.Add(dt)
-		x.headItem.set(k, h1, h2, keyIndex, itm1)
-		x.count.Add(1)
+		itm1.index = x.rb.Add(dt)
+		x.headItem.set(k, h1, keyIndex, itm1)
+		x.count.Inc()
 	}
-
-	x.size.Add(uint32(itm1.size))
 	return
 }
 
-func (x *xcache) hashKey(k []byte) (uint16, uint16) {
-	keyHash := uint32(xxhash.Sum64(k) >> 32)
-	return uint16(keyHash >> key16), uint16(keyHash & keyCode)
+func (x *xcache) hashKey(k []byte) uint32 {
+	return uint32(xxhash.Sum64(k) >> 32)
 }
 
 // Get ...
 func (x *xcache) Get(k []byte) ([]byte, error) {
-	return x.getSet(k, x.opts.DefaultExpiration, nil)
+	return x.getSet(k, x.opts.DefaultExpiration)
 }
 
-// GetExpiration ...
-func (x *xcache) GetExpiration(key []byte) (value []byte, tm int64, err error) {
+// Delete ...
+func (x *xcache) Delete(key []byte) (err error) {
 	xerror.RespErr(&err)
 
 	xerror.Panic(x.checkKey(len(key)))
 
-	hashKey1, hashKey2 := x.hashKey(key)
-	itm, _, existed := x.search(string(key), hashKey1, hashKey2)
+	h1 := x.hashKey(key)
+	k := string(key)
+	itm, kt, existed := x.search(k, h1)
 	if !existed {
-		return nil, 0, ErrKeyNotFound
+		return ErrKeyNotFound
 	}
 
-	return x.rb.Get(itm.u, itm.u2)[itm.keyLen:], itm.expireAt, nil
+	x.headItem.del(k, h1, kt)
+	x.size.Sub(uint32(itm.size))
+	x.count.Dec()
+	return nil
 }
 
-// Delete ...
-func (x *xcache) Delete(k []byte) (err error) {
-	xerror.RespErr(&err)
-
-	xerror.Panic(x.checkKey(len(k)))
-
-	h1, h2 := x.hashKey(k)
-	itm, kt, existed := x.search(string(k), h1, h2)
-	if !existed {
-		return xerror.WrapF(ErrKeyNotFound, "key: %s", k)
+// 随机的找寻
+func (x *xcache) randomDeleteExpired() {
+	for _, itm := range x.headItem.randomExpired(x.opts.ClearRate) {
+		x.headItem.del("", itm.h1, keyIndex)
+		x.size.Sub(uint32(itm.size))
+		x.count.Dec()
+		x.sg.Clear()
 	}
-
-	//if x.opts.EvictedHandle != nil {
-	//	go func() {
-	//		defer xerror.RespExit()
-	//		x.opts.EvictedHandle(k, x.rb.Get(itm.u, itm.u2))
-	//	}()
-	//}
-
-	x.headItem.del(string(k), h1, h2, kt)
-	x.rb.Delete(itm.u, itm.u2)
-	x.size.Sub(uint32(itm.size))
-	x.count.Sub(1)
-	return nil
 }
 
 // DeleteExpired ...
 func (x *xcache) DeleteExpired() error {
-	return nil
-}
-
-// Close ...
-func (x *xcache) Close() error {
-	x.rb.Close()
-	*x = xcache{}
+	x.headItem.dupClear()
+	for _, itm := range x.headItem.randomExpired(1.0) {
+		itm := itm
+		x.headItem.del("", itm.h1, keyIndex)
+		x.size.Sub(uint32(itm.size))
+		x.count.Dec()
+		x.sg.Clear()
+	}
 	return nil
 }

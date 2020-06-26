@@ -6,10 +6,6 @@ import (
 
 type MemClearStrategy uint8
 
-const (
-	d MemClearStrategy = 1 << iota
-)
-
 // ICache
 type IXCache interface {
 	Set(k, v []byte, e time.Duration) error
@@ -17,12 +13,10 @@ type IXCache interface {
 	GetSet(k, v []byte, e time.Duration) ([]byte, error)
 	GetWithDataLoad(k []byte, e time.Duration, fn ...func(k []byte) (v []byte, err error)) ([]byte, error)
 	Delete(k []byte) error
+	DeleteExpired() error
 	Init(opts ...Option) error
 	Option() Options
 }
-
-//DeleteExpired() error
-//GetExpiration(k []byte) (v []byte, expired int64, err error)
 
 // Options 缓存配置变量
 type Options struct {
@@ -30,31 +24,26 @@ type Options struct {
 	MinExpiration     time.Duration
 	MaxExpiration     time.Duration
 
-	MinBufSize   int
-	MaxBufSize   uint32
-	MaxBufFactor float32
-	MaxBufExpand float32
+	MinBufSize int
+	MaxBufSize uint32
 
 	MinDataSize int
 	MaxDataSize int
+	MaxKeySize  int
 
 	DataLoadTime time.Duration
 	ClearTime    time.Duration
+	ClearRate    float32
 	Delimiter    string
-
-	// 缓存过期驱逐处理
-	//EvictedHandle func(key, value []byte)
-	// 缓存过期清理策略
-	// ExpiredHandle func(key, value []byte)
-	// 缓存内存超限处理
-	MemExceededHandle func(key, value []byte)
+	// 定期清理时间
+	Interval time.Duration
 
 	// 防止雪崩策略
 	SnowSlideStrategy func(expired time.Duration) time.Duration
 	// 防止穿透策略
-	PenetrateStrategy func(k, v []byte) (value []byte, e time.Duration)
+	PenetrateStrategy func(k []byte, fn ...func(k []byte) ([]byte, error)) ([]byte, error)
 	// 防止击穿策略
-	BreakdownStrategy func()
+	BreakdownStrategy func([]byte, []byte, time.Duration) ([]byte, time.Duration)
 }
 
 // Option 可选配置
@@ -64,9 +53,9 @@ func Init(opts ...Option) error {
 	return defaultXCache.Init(opts...)
 }
 
-//func DeleteExpired() error {
-//	return defaultXCache.DeleteExpired()
-//}
+func DeleteExpired() error {
+	return defaultXCache.DeleteExpired()
+}
 
 func Delete(k []byte) error {
 	return defaultXCache.Delete(k)
@@ -82,14 +71,6 @@ func Get(k []byte) ([]byte, error) {
 
 func GetSet(k []byte, v []byte, e time.Duration) ([]byte, error) {
 	return defaultXCache.GetSet(k, v, e)
-}
-
-//func GetWithExpiration(key []byte) (value []byte, tm int64, err error) {
-//	return defaultXCache.GetExpiration(key)
-//}
-
-func SetDefaultCache(i IXCache) {
-	defaultXCache = i
 }
 
 func GetOption() Options {

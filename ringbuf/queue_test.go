@@ -1,4 +1,4 @@
-package xcache
+package ringbuf
 
 import (
 	"sync"
@@ -6,12 +6,12 @@ import (
 )
 
 func TestQueue(t *testing.T) {
-	q := &queue{Mutex:sync.Mutex{}}
+	q := &queue{Mutex: sync.Mutex{}}
 	var g sync.WaitGroup
 	for i := 0; i < 10; i++ {
 		g.Add(1)
 		go func(i int) {
-			q.Push(i)
+			q.Push(uint32(i))
 			g.Done()
 		}(i)
 	}

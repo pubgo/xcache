@@ -1,6 +1,10 @@
 package singleflight
 
-import "sync"
+import (
+	"go.uber.org/atomic"
+	"runtime"
+	"sync"
+)
 
 // call is an in-flight or completed Do call
 type call struct {
@@ -12,13 +16,16 @@ type call struct {
 // Group represents a class of work and forms a namespace in which
 // units of work can be executed with duplicate suppression.
 type Group struct {
-	mu sync.Mutex       // protects m
-	m  map[string]*call // lazily initialized
+	mu    sync.Mutex // protects m
+	count atomic.Uint32
+	m     map[string]*call // lazily initialized
 }
 
 func (g *Group) Clear() {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	for g.count.Load() > 0 {
+		runtime.Gosched()
+	}
+
 	g.m = nil
 }
 
@@ -38,6 +45,7 @@ func (g *Group) Do(key string, fn func() (interface{}, error)) (interface{}, err
 	}
 	c := new(call)
 	c.wg.Add(1)
+	g.count.Add(1)
 	g.m[key] = c
 	g.mu.Unlock()
 
@@ -47,6 +55,7 @@ func (g *Group) Do(key string, fn func() (interface{}, error)) (interface{}, err
 	g.mu.Lock()
 	delete(g.m, key)
 	g.mu.Unlock()
+	g.count.Sub(1)
 
 	return c.val, c.err
 }

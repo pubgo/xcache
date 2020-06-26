@@ -1,15 +1,20 @@
 package xcache
 
-/*
-// 定时清理过期数据
-func (x *xcache) initJanitor(interval time.Duration) error {
+import (
+	"github.com/pubgo/xcache/consts"
+	"github.com/pubgo/xerror"
+	"runtime"
+	"time"
+)
+
+// 定期清理过期数据
+func (x *xcache) initJanitor() error {
+	interval := x.opts.ClearTime
 	if interval > 0 {
 		if interval < consts.DefaultMinExpiration {
 			return xerror.WrapF(ErrClearTime, "过期时间(%s)小于最小过期时间(%s)", interval, consts.DefaultMinExpiration)
 		}
 
-		x.mutex.Lock()
-		defer x.mutex.Unlock()
 		if x.janitor == nil {
 			runtime.SetFinalizer(x, stopJanitor)
 		} else {
@@ -44,11 +49,10 @@ func (j *janitor) Run(c *xcache) {
 	for {
 		select {
 		case <-ticker.C:
-			_ = c.DeleteExpired()
+			c.randomDeleteExpired()
 		case <-j.stop:
 			ticker.Stop()
 			return
 		}
 	}
 }
-*/
