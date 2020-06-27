@@ -19,8 +19,9 @@ type headItem struct {
 }
 
 type expiredItem struct {
-	item
-	h1 uint32
+	size  uint16
+	index uint32
+	h1    uint32
 }
 
 func (x *headItem) dupClear() {
@@ -48,7 +49,7 @@ func (x *headItem) randomExpired(rate float32) []expiredItem {
 		}
 
 		if v1.expireAt < now {
-			items = append(items, expiredItem{h1: h1, item: v1})
+			items = append(items, expiredItem{h1: h1, index: v1.index, size: v1.size})
 		}
 		n--
 	}

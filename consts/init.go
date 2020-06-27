@@ -11,9 +11,9 @@ const (
 	DefaultMaxExpiration = time.Minute
 
 	// 默认最小缓存10M
-	DefaultMinBufSize = 10 * 1 << 20
-	// 默认最大缓存, 超过会清理过期数据
-	DefaultMaxBufSize = 1500 * 1 << 20
+	DefaultMinBufSize = 10 << 20
+	// 默认最大缓存1G, 超过会清理过期数据
+	DefaultMaxBufSize = 1 << 30
 	// 默认扩展缓存系数
 
 	// 缓存数据最小长度, key

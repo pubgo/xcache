@@ -25,7 +25,6 @@ func (g *Group) Clear() {
 	for g.count.Load() > 0 {
 		runtime.Gosched()
 	}
-
 	g.m = nil
 }
 
@@ -45,7 +44,7 @@ func (g *Group) Do(key string, fn func() (interface{}, error)) (interface{}, err
 	}
 	c := new(call)
 	c.wg.Add(1)
-	g.count.Add(1)
+	g.count.Inc()
 	g.m[key] = c
 	g.mu.Unlock()
 
@@ -55,7 +54,7 @@ func (g *Group) Do(key string, fn func() (interface{}, error)) (interface{}, err
 	g.mu.Lock()
 	delete(g.m, key)
 	g.mu.Unlock()
-	g.count.Sub(1)
+	g.count.Dec()
 
 	return c.val, c.err
 }

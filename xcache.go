@@ -53,10 +53,6 @@ func Init(opts ...Option) error {
 	return defaultXCache.Init(opts...)
 }
 
-func DeleteExpired() error {
-	return defaultXCache.DeleteExpired()
-}
-
 func Delete(k []byte) error {
 	return defaultXCache.Delete(k)
 }

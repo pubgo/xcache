@@ -12,15 +12,19 @@ type ringBuf struct {
 }
 
 func (r *ringBuf) ClearExpired() {
+	r.Lock()
+	defer r.Unlock()
+	r.data = r.data[:len(r.data):len(r.data)]
 }
 
 func (r *ringBuf) Add(bytes []byte) uint32 {
+	bytes = bytes[:len(bytes):len(bytes)]
 	size := r.q.Pop()
 	if size == math.MaxUint32 {
 		r.Lock()
 		defer r.Unlock()
 		r.data = append(r.data, bytes)
-		return uint32(len(r.data))-1
+		return uint32(len(r.data)) - 1
 	}
 	r.data[size] = bytes
 	return size
@@ -40,7 +44,7 @@ func (r *ringBuf) Get(u uint32) []byte {
 }
 
 func newRingBuf() *ringBuf {
-	return &ringBuf{data: make([][]byte,0)}
+	return &ringBuf{data: make([][]byte, 0)}
 }
 
 type RingBuf struct {

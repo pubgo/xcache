@@ -349,6 +349,7 @@ func (x *xcache) Delete(key []byte) (err error) {
 	}
 
 	x.headItem.del(k, h1, kt)
+	x.rb.Delete(itm.index)
 	x.size.Sub(uint32(itm.size))
 	x.count.Dec()
 	return nil
@@ -357,19 +358,25 @@ func (x *xcache) Delete(key []byte) (err error) {
 // 随机的找寻
 func (x *xcache) randomDeleteExpired() {
 	for _, itm := range x.headItem.randomExpired(x.opts.ClearRate) {
-		x.headItem.del("", itm.h1, keyIndex)
-		x.size.Sub(uint32(itm.size))
-		x.count.Dec()
-		x.sg.Clear()
+		itm := itm
+		go func() {
+			x.headItem.del("", itm.h1, keyIndex)
+			x.rb.Delete(itm.index)
+			x.size.Sub(uint32(itm.size))
+			x.count.Dec()
+			x.sg.Clear()
+		}()
 	}
 }
 
 // DeleteExpired ...
 func (x *xcache) DeleteExpired() error {
 	x.headItem.dupClear()
+	x.rb.ClearExpired()
 	for _, itm := range x.headItem.randomExpired(1.0) {
 		itm := itm
 		x.headItem.del("", itm.h1, keyIndex)
+		x.rb.Delete(itm.index)
 		x.size.Sub(uint32(itm.size))
 		x.count.Dec()
 		x.sg.Clear()
