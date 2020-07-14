@@ -49,7 +49,7 @@ func (j *janitor) Run(c *xcache) {
 	for {
 		select {
 		case <-ticker.C:
-			c.randomDeleteExpired()
+			go c.randomDeleteExpired()
 		case <-j.stop:
 			ticker.Stop()
 			return

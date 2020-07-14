@@ -4,8 +4,6 @@ import (
 	"time"
 )
 
-type MemClearStrategy uint8
-
 // ICache
 type IXCache interface {
 	Set(k, v []byte, e time.Duration) error
@@ -14,6 +12,8 @@ type IXCache interface {
 	GetWithDataLoad(k []byte, e time.Duration, fn ...func(k []byte) (v []byte, err error)) ([]byte, error)
 	Delete(k []byte) error
 	DeleteExpired() error
+	Size() uint32
+	Count() uint32
 	Init(opts ...Option) error
 	Option() Options
 }
@@ -75,4 +75,12 @@ func GetOption() Options {
 
 func GetWithDataLoad(k []byte, e time.Duration, fn ...func(k []byte) (v []byte, err error)) ([]byte, error) {
 	return defaultXCache.GetWithDataLoad(k, e, fn...)
+}
+
+func Size() uint32 {
+	return defaultXCache.Size()
+}
+
+func Count() uint32 {
+	return defaultXCache.Count()
 }

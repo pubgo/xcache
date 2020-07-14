@@ -1,6 +1,7 @@
 package xcache
 
 import (
+	"bytes"
 	"github.com/cespare/xxhash"
 	"github.com/pubgo/xcache/consts"
 	"github.com/pubgo/xcache/ringbuf"
@@ -42,7 +43,7 @@ type item struct {
 }
 
 type xcache struct {
-	mutex    sync.Mutex
+	mu       sync.RWMutex
 	opts     Options
 	size     atomic.Uint32
 	count    atomic.Uint32
@@ -50,6 +51,10 @@ type xcache struct {
 	rb       *ringbuf.RingBuf
 	headItem *headItem
 	janitor  *janitor
+}
+
+func (x *xcache) Count() uint32 {
+	return x.count.Load()
 }
 
 // GetWithDataLoad ...
@@ -74,7 +79,6 @@ func (x *xcache) init() *xcache {
 	x.opts.DataLoadTime = consts.DefaultDataLoadTime
 	x.opts.ClearTime = consts.DefaultClearTime
 	x.opts.ClearRate = consts.DefaultClearNum
-	x.opts.Delimiter = consts.DefaultDelimiter
 	x.opts.SnowSlideStrategy = func(expired time.Duration) time.Duration {
 		return expired + time.Duration(rand.Intn(int(x.opts.MinExpiration)))
 	}
@@ -117,8 +121,8 @@ func (x *xcache) init() *xcache {
 
 // Init ...
 func (x *xcache) Init(opts ...Option) error {
-	x.mutex.Lock()
-	defer x.mutex.Unlock()
+	x.mu.Lock()
+	defer x.mu.Unlock()
 
 	opt := x.opts
 	for _, o := range opts {
@@ -219,20 +223,25 @@ func (x *xcache) getSet(k []byte, e time.Duration, fn ...func([]byte) ([]byte, e
 	xerror.Panic(x.checkKey(len(k)))
 
 	h1 := x.hashKey(k)
+
+	x.mu.RLock()
 	itm, _, existed := x.search(string(k), h1)
 	if existed {
 		if time.Now().UnixNano() < itm.expireAt {
-			return x.rb.Get(itm.index)[itm.key:], nil
+			dt = x.rb.Get(itm.index)[itm.key:]
+			x.mu.RUnlock()
+			return dt, nil
 		}
 		// 惰性过期清理
 		go func() {
 			_ = x.Delete(k)
 		}()
 	}
+	x.mu.RUnlock()
 
 	// key不存在并且数据加载函数为nil
 	if len(fn) == 0 || fn[0] == nil {
-		return nil, ErrKeyNotFound
+		return nil, xerror.WrapF(ErrKeyNotFound, "key: %s", k)
 	}
 
 	if x.opts.PenetrateStrategy != nil {
@@ -242,7 +251,7 @@ func (x *xcache) getSet(k []byte, e time.Duration, fn ...func([]byte) ([]byte, e
 	}
 
 	if err != nil {
-		return nil, err
+		return nil, xerror.Wrap(err)
 	}
 
 	dt, e = x.opts.BreakdownStrategy(k, dt, e)
@@ -262,12 +271,8 @@ func (x *xcache) search(key string, h1 uint32) (item, keyType, bool) {
 
 // Size ...
 func (x *xcache) Size() uint32 {
+	//return x.size.Load() + x.count.Load()*20
 	return x.size.Load()
-}
-
-// Len ...
-func (x *xcache) Len() uint32 {
-	return x.count.Load()
 }
 
 // SetDefault ...
@@ -291,7 +296,10 @@ func (x *xcache) Set(key []byte, v []byte, e time.Duration) (err error) {
 		e = x.opts.SnowSlideStrategy(e)
 	}
 
-	var dt = append(key, v...)
+	var dt = make([]byte, l)
+	copy(dt[copy(dt, key):], v)
+	//dt=append(dt,key...)
+	//dt=append(dt,v...)
 
 	// 内存超限处理
 	{
@@ -302,7 +310,7 @@ func (x *xcache) Set(key []byte, v []byte, e time.Duration) (err error) {
 			go func() {
 				_ = x.DeleteExpired()
 			}()
-			return ErrBufExceeded
+			return xerror.WrapF(ErrBufExceeded, "bufSize: %d", bufSize)
 		}
 	}
 
@@ -313,16 +321,26 @@ func (x *xcache) Set(key []byte, v []byte, e time.Duration) (err error) {
 
 	h1 := x.hashKey(key)
 	k := string(key)
+
+	x.mu.Lock()
+	defer x.mu.Unlock()
 	itm, kt, existed := x.search(k, h1)
 	if existed {
-		itm1.index = x.rb.Replace(itm.index, dt)
-		x.headItem.set(k, h1, kt, itm1)
+		itm1.index = itm.index
+		if kt == keyIndex && bytes.Equal(x.rb.Get(itm.index)[:itm.key], key) {
+			x.headItem.set(k, h1, keyIndex, itm1)
+		} else {
+			x.headItem.set(k, h1, keyDup, itm1)
+		}
+
+		x.rb.Replace(itm.index, dt)
 		x.size.Sub(uint32(l))
 	} else {
 		itm1.index = x.rb.Add(dt)
 		x.headItem.set(k, h1, keyIndex, itm1)
 		x.count.Inc()
 	}
+
 	return
 }
 
@@ -343,12 +361,16 @@ func (x *xcache) Delete(key []byte) (err error) {
 
 	h1 := x.hashKey(key)
 	k := string(key)
+
+	x.mu.Lock()
 	itm, kt, existed := x.search(k, h1)
 	if !existed {
-		return ErrKeyNotFound
+		x.mu.Unlock()
+		return xerror.WrapF(ErrKeyNotFound, "key: %s", key)
 	}
-
 	x.headItem.del(k, h1, kt)
+	x.mu.Unlock()
+
 	x.rb.Delete(itm.index)
 	x.size.Sub(uint32(itm.size))
 	x.count.Dec()
@@ -357,29 +379,34 @@ func (x *xcache) Delete(key []byte) (err error) {
 
 // 随机的找寻
 func (x *xcache) randomDeleteExpired() {
+	x.sg.Clear()
+
+	x.mu.Lock()
+	defer x.mu.Unlock()
+
 	for _, itm := range x.headItem.randomExpired(x.opts.ClearRate) {
-		itm := itm
-		go func() {
-			x.headItem.del("", itm.h1, keyIndex)
-			x.rb.Delete(itm.index)
-			x.size.Sub(uint32(itm.size))
-			x.count.Dec()
-			x.sg.Clear()
-		}()
+		x.headItem.del("", itm.h1, keyIndex)
+		x.rb.Delete(itm.index)
+		x.size.Sub(uint32(itm.size))
+		x.count.Dec()
 	}
 }
 
 // DeleteExpired ...
 func (x *xcache) DeleteExpired() error {
-	x.headItem.dupClear()
-	x.rb.ClearExpired()
-	for _, itm := range x.headItem.randomExpired(1.0) {
-		itm := itm
-		x.headItem.del("", itm.h1, keyIndex)
-		x.rb.Delete(itm.index)
-		x.size.Sub(uint32(itm.size))
-		x.count.Dec()
-		x.sg.Clear()
-	}
-	return nil
+	_, err := x.sg.Do("DeleteExpired", func() (interface{}, error) {
+		x.mu.Lock()
+		defer x.mu.Unlock()
+
+		x.headItem.dupClear()
+		x.rb.ClearExpired()
+		for _, itm := range x.headItem.randomExpired(1.0) {
+			x.headItem.del("", itm.h1, keyIndex)
+			x.rb.Delete(itm.index)
+			x.size.Sub(uint32(itm.size))
+			x.count.Dec()
+		}
+		return nil, nil
+	})
+	return err
 }

@@ -2,12 +2,17 @@ package xcache
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
+	"github.com/cespare/xxhash"
 	"github.com/pubgo/xerror"
 	"github.com/pubgo/xtest"
 	"github.com/smartystreets/gunit"
+	"os"
+	"runtime"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 func TestNew(t *testing.T) {
@@ -139,17 +144,112 @@ func BenchmarkName(b *testing.B) {
 	}
 }
 
-var sss = make(map[string]interface{})
-
 func TestName(t *testing.T) {
+	//xtest.PrintMemStats()
+	//b1 := xtest.Benchmark(3000000, func(b *xtest.B) {
+	//	key := xtest.RangeBytes(99, 100)
+	//	xerror.Panic(Set(key, key, time.Second*10))
+	//	go func() {
+	//		time.Sleep(xtest.RangeDur(time.Millisecond*10,time.Second*5))
+	//		Delete(key)
+	//	}()
+	//})
+	//xtest.PrintMemStats()
+	//fmt.Println(b1.MemBytes, Size(), Count())
+
+	//fmt.Printf("\n\n")
+	//xtest.PrintMemStats()
+	//var b1 bitset.BitSet
+	//b2 := xtest.Benchmark(3000000, func(b *xtest.B) {
+	//	key := xtest.RangeBytes(99, 100)
+	//	b1.Set(uint(xxhash.Sum64(key))).None()
+	//})
+	type item struct {
+		_        uint8
+		key      uint8
+		size     uint16
+		index    uint32
+		expireAt int64
+	}
+
 	xtest.PrintMemStats()
-	ben:=xtest.Benchmark(1000000, func(b *xtest.B) {
-		b.StopTimer()
-		key := xtest.RangeBytes(99, 100)
-		b.StartTimer()
-		sss[string(key)] = key
+	var ss = make([]*item, 1<<30)
+	_ = ss
+	xtest.PrintMemStats()
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	dd, err := json.MarshalIndent(m, "", "\t")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(string(dd))
+	select {}
+}
+
+type node struct {
+	val  int
+	next *node
+}
+
+type entity struct {
+	deleted bool
+	key     uint8
+	_       [6]byte
+	data    []byte
+	expired int64
+	next    *entity
+}
+
+func TestName1(t *testing.T) {
+	fmt.Println(unsafe.Sizeof(entity{}))
+}
+
+func jmp(key uint64, buckets uint32) uint32 {
+	var b, j uint64
+
+	if buckets <= 0 {
+		buckets = 1
+	}
+
+	for j < uint64(buckets) {
+		b = j
+		key = key*2862933555777941757 + 1
+		j = uint64(float64(b+1) * (float64(int64(1)<<31) / float64((key>>33)+1)))
+	}
+
+	return uint32(b)
+}
+
+func slot(key []byte, slot uint32) uint32 {
+	return uint32(xxhash.Sum64(key)>>32) & slot
+}
+
+var sss = uint32(1 << 30)
+
+func BenchmarkNam2e(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		slot([]byte("hello000hello000hello000hello000hello000hello000hello000hello000"), sss)
+	}
+}
+
+var map1 = map[string]interface{}{"hellohellohellohellohellohellohellohellohellohellohellohello": 1}
+var map2 = map[uint32]interface{}{1111111111: 1}
+
+func BenchmarkName1(b *testing.B) {
+
+	b.Run("map1", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			_ = map1["hellohellohellohellohellohellohellohellohellohellohellohello"]
+		}
 	})
-	xtest.PrintMemStats()
-	fmt.Println(ben.String())
-	fmt.Println(ben.MemString())
+
+	b.Run("map2", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			_ = map2[1111111111]
+		}
+	})
+}
+
+func TestName123(t *testing.T) {
+	fmt.Println(os.ExpandEnv("$HOME/data/"))
 }

@@ -33,3 +33,7 @@ build:
 	@go build -o main cmd/main.go
 	./main xtest.go
 
+%: %.go
+	go build -ldflags "-w -s" $<
+
+all: swapview

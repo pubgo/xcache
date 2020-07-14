@@ -1,7 +1,6 @@
 package xcache
 
 import (
-	"sync"
 	"time"
 )
 
@@ -13,7 +12,6 @@ const (
 )
 
 type headItem struct {
-	mutex sync.RWMutex
 	items map[uint32]item
 	dup   map[string]item
 }
@@ -27,11 +25,9 @@ type expiredItem struct {
 func (x *headItem) dupClear() {
 	var dup = make(map[string]item, len(x.dup))
 
-	x.mutex.RLock()
 	for k, v := range x.dup {
 		dup[k] = v
 	}
-	x.mutex.RUnlock()
 
 	x.dup = dup
 }
@@ -42,7 +38,6 @@ func (x *headItem) randomExpired(rate float32) []expiredItem {
 	var items = make([]expiredItem, n)
 	var now = time.Now().UnixNano()
 
-	x.mutex.RLock()
 	for h1, v1 := range x.items {
 		if n == 0 {
 			break
@@ -53,16 +48,20 @@ func (x *headItem) randomExpired(rate float32) []expiredItem {
 		}
 		n--
 	}
-	x.mutex.RUnlock()
 
 	return items
 }
 
 func (x *headItem) get(key string, h1 uint32) (item, keyType, bool) {
-	x.mutex.RLock()
-	defer x.mutex.RUnlock()
+	keyHead, ok := x.dup[key]
+	if ok {
+		if keyHead.expireAt != 0 {
+			return keyHead, keyDup, true
+		}
+		return emptyItem, keyDup, false
+	}
 
-	keyHead, ok := x.items[h1]
+	keyHead, ok = x.items[h1]
 	if ok {
 		if keyHead.expireAt != 0 {
 			return keyHead, keyIndex, true
@@ -70,20 +69,10 @@ func (x *headItem) get(key string, h1 uint32) (item, keyType, bool) {
 		return emptyItem, keyIndex, false
 	}
 
-	keyHead, ok = x.dup[key]
-	if ok {
-		if keyHead.expireAt != 0 {
-			return keyHead, keyDup, true
-		}
-		return emptyItem, keyDup, false
-	}
 	return emptyItem, keyDup, false
 }
 
 func (x *headItem) set(key string, h1 uint32, kt keyType, itm item) {
-	x.mutex.Lock()
-	defer x.mutex.Unlock()
-
 	if kt == keyIndex {
 		x.items[h1] = itm
 	} else {
@@ -92,9 +81,6 @@ func (x *headItem) set(key string, h1 uint32, kt keyType, itm item) {
 }
 
 func (x *headItem) del(key string, h1 uint32, kt keyType) {
-	x.mutex.Lock()
-	defer x.mutex.Unlock()
-
 	if kt == keyIndex {
 		delete(x.items, h1)
 	} else {

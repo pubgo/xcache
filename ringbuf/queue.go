@@ -2,11 +2,9 @@ package ringbuf
 
 import (
 	"math"
-	"sync"
 )
 
 type queue struct {
-	sync.Mutex
 	value []uint32
 }
 
@@ -17,17 +15,11 @@ func (q *queue) Len() int {
 
 // Push ...
 func (q *queue) Push(val uint32) {
-	q.Lock()
-	defer q.Unlock()
-
 	q.value = append(q.value, val)
 }
 
 // Pop ...
 func (q *queue) Pop() uint32 {
-	q.Lock()
-	defer q.Unlock()
-
 	l := len(q.value)
 
 	if l == 0 {
